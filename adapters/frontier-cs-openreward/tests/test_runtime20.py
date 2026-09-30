@@ -1,9 +1,11 @@
 """Exercise official asynchronous judge and final-rerun semantics over HTTP."""
 import asyncio
+import ast
 import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import unittest
 
@@ -13,6 +15,7 @@ from aiohttp import web
 from frontier_cs_openreward.contracts import InfrastructureError, TaskRecord
 from frontier_cs_openreward.runtime20 import (
     Frontier20Session, artifact_payload, checked_result, private_judge_source,
+    private_evaluator_source,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +23,50 @@ TEMPLATE = ROOT / 'frontier-cs-2.0/src/frontier_cs_2_0/task-template/environment
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_duckdb_allocator_environment_preserves_native_evaluation(self):
+        source = (ROOT.parent / '2.0/problems/duckdb_e2e_query_optimization/evaluator.py').read_text()
+        adapted = private_evaluator_source('duckdb_e2e_query_optimization', source)
+        original_tree, adapted_tree = ast.parse(source), ast.parse(adapted)
+        def without_environment(tree):
+            return [ast.dump(node) for node in tree.body
+                    if not isinstance(node, ast.FunctionDef) or node.name not in {'clean_env', 'evaluate'}]
+        self.assertEqual(without_environment(original_tree), without_environment(adapted_tree))
+        clean_env = next(node for node in adapted_tree.body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'clean_env')
+        namespace = {'Path': Path}
+        exec(compile(ast.Module(body=[clean_env], type_ignores=[]), '<clean_env>', 'exec'), namespace)
+        with tempfile.TemporaryDirectory() as name:
+            env = namespace['clean_env'](Path(name))
+            self.assertEqual(env['MALLOC_ARENA_MAX'], '2')
+            self.assertTrue(Path(env['HOME']).is_dir())
+            self.assertTrue(Path(env['TMPDIR']).is_dir())
+        self.assertEqual(private_evaluator_source('vector_db_ann', source), source)
+
+    def test_duckdb_baseline_failure_is_infrastructure_but_candidate_failure_is_zero(self):
+        source = (ROOT.parent / '2.0/problems/duckdb_e2e_query_optimization/evaluator.py').read_text()
+        tree = ast.parse(private_evaluator_source('duckdb_e2e_query_optimization', source))
+        evaluate = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'evaluate')
+        namespace = {'Path': Path, 'Any': object, 'subprocess': subprocess,
+                     'validate_patch': lambda path: (True, '', {}),
+                     'safe_failed_command': lambda cmd: Path(cmd[0]).name,
+                     '_invalid': lambda message, metrics: (0, 0, message, metrics)}
+        exec(compile(ast.Module(body=[evaluate], type_ignores=[]), '<evaluate>', 'exec'), namespace)
+        def fail(command):
+            def run(*args):
+                raise subprocess.CalledProcessError(1, [command], stderr='Out of Memory Error')
+            return run
+        namespace['full_evaluation'] = fail('/opt/duckdb-vanilla/build/release/duckdb')
+        with self.assertRaisesRegex(RuntimeError, 'Pristine DuckDB baseline'):
+            namespace['evaluate']('/app/solution.patch')
+        namespace['full_evaluation'] = fail('/opt/duckdb-clean/build/release/duckdb')
+        self.assertEqual(namespace['evaluate']('/app/solution.patch')[0], 0)
+        namespace['full_evaluation'] = lambda *args: (73, 73, 'native score', {})
+        self.assertEqual(namespace['evaluate']('/app/solution.patch')[0], 73)
+
+    def test_changed_duckdb_environment_contract_fails_closed(self):
+        with self.assertRaisesRegex(InfrastructureError, 'anchor changed'):
+            private_evaluator_source('duckdb_e2e_query_optimization', 'def clean_env(): return {}')
+
     def test_workspace_boundary_and_official_directory_exclusions(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

@@ -54,6 +54,32 @@ def private_judge_source(source: str, transport_token: str, final_token: str) ->
                           'ThreadingHTTPServer(("127.0.0.1", port), JudgeHandler)')
 
 
+def private_evaluator_source(problem_id: str, source: str) -> str:
+    """Adapt DuckDB's host allocator and identify pristine baseline failures."""
+    if problem_id != "duckdb_e2e_query_optimization":
+        return source
+    # On large hosts glibc's per-thread arenas exhaust the official 12 GiB
+    # virtual-memory limit at <1 GiB RSS, even with eight-core affinity. Apply
+    # the same allocator setting to baseline and candidate subprocesses;
+    # preserve the native memory limits, workloads, and score calculation.
+    anchor = '        "CCACHE_DIR": str(tmp_root / "ccache"),\n'
+    if source.count(anchor) != 1 or 'def clean_env(tmp_root: Path)' not in source:
+        raise InfrastructureError("Official DuckDB environment anchor changed")
+    source = source.replace(anchor, anchor + '        "MALLOC_ARENA_MAX": "2",\n')
+    failure = ('    except subprocess.CalledProcessError as exc:\n'
+               '        failed_command = safe_failed_command(exc.cmd)\n')
+    if source.count(failure) != 1:
+        raise InfrastructureError("Official DuckDB failure handler anchor changed")
+    # A pristine baseline failure says nothing about the candidate. Let the
+    # official judge report an infrastructure error instead of a zero reward.
+    replacement = ('    except subprocess.CalledProcessError as exc:\n'
+                   '        if (isinstance(exc.cmd, (list, tuple)) and exc.cmd\n'
+                   '                and str(exc.cmd[0]).startswith("/opt/duckdb-vanilla/")):\n'
+                   '            raise RuntimeError("Pristine DuckDB baseline command failed") from exc\n'
+                   '        failed_command = safe_failed_command(exc.cmd)\n')
+    return source.replace(failure, replacement)
+
+
 def artifact_payload(workspace: Path, path: str, config: dict, *, final: bool) -> dict | None:
     """Read only artifacts confined to /app; never follow a link onto the host."""
     public_path = PurePosixPath(path)
@@ -196,8 +222,9 @@ class Frontier20Session:
         private.mkdir(mode=0o700)
         (private / "judge_server.py").write_text(private_judge_source(
             (environment / "judge_server.py").read_text(), self._auth, self._final_auth))
-        for name in ("problem_evaluator.py", "task_config.json"):
-            shutil.copy2(environment / name, private / name)
+        (private / "problem_evaluator.py").write_text(private_evaluator_source(
+            self.task.problem_id, (environment / "problem_evaluator.py").read_text()))
+        shutil.copy2(environment / "task_config.json", private / "task_config.json")
         for path in private.iterdir():
             path.chmod(0o600)
         logs = self.directory / "judge-logs"
