@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
 import importlib
@@ -20,7 +21,7 @@ from uuid import uuid4
 
 from .contracts import CommandResult, InfrastructureError, TaskRecord
 
-_BACKEND_REVISION = "d6a48bc003aabb3d754880c31ae15592a28ee460"
+_BACKEND_REVISION = "97bc90e619f61dd1d21e80be3627dddd42235d63"
 
 
 @lru_cache(maxsize=1)
@@ -42,8 +43,26 @@ def _backend_module():
     return module
 
 
+@dataclass
+class _SandboxGeneration:
+    # One shared budget and recovery per instance lifetime. Completed runs do
+    # not retain PID roots; orphaned background work belongs to namespace init.
+    exec_pids: set[int] = field(default_factory=set)
+    operations: set[asyncio.Task] = field(default_factory=set)
+    watcher: asyncio.Task | None = None
+    failure: Exception | None = None
+    recovery: asyncio.Task | None = None
+
+
 class Sandbox:
-    """One private writable instance; mounts and environment are operator-only."""
+    """One private writable instance; mounts and environment are operator-only.
+
+    A single lifetime watchdog charges the instance and every active exec tree
+    to one PSS budget, including background work between tools. On a breach all
+    execs are reaped before the instance restarts; its writable files survive.
+    Active calls (or the next call after an idle breach) return 137. Subsequent
+    calls use the recovered instance. Memory sensor errors fail as infrastructure.
+    """
 
     def __init__(
         self, image: str, *, mounts=(), env=None, cpus=(), workdir="/app",
@@ -137,42 +156,144 @@ class Sandbox:
 
         self.backend = TaskSandbox(image)
         self.backend.writable_directory = True
+        self._generation = _SandboxGeneration()
+        self._closing = False
+        self._close_task = None
+
+    def _memory_roots(self, generation):
+        return tuple(pid for pid in (self.backend.instance_pid, *generation.exec_pids) if pid)
+
+    def _start_watcher(self, generation):
+        if self.memory_limit_bytes:
+            generation.watcher = asyncio.create_task(self._monitor_memory(generation))
+
+    async def _monitor_memory(self, generation):
+        try:
+            await _watch_memory(lambda: self._memory_roots(generation), self.memory_limit_bytes)
+        except (MemoryLimitExceeded, OSError, ValueError) as exc:
+            logging.getLogger(__name__).error(
+                "frontier_sandbox_memory_failure %s",
+                json.dumps({"sandbox": self.backend.name,
+                            "limit_bytes": self.memory_limit_bytes,
+                            "roots": self._memory_roots(generation),
+                            "error": f"{type(exc).__name__}: {exc}"}),
+            )
+            self._begin_recovery(generation, exc)
+
+    def _begin_recovery(self, generation, failure):
+        if generation.failure is None:
+            generation.failure = failure
+        if generation.recovery is None:
+            self.backend.started = False
+            generation.recovery = asyncio.create_task(self._recover(generation))
+
+    async def _recover(self, generation):
+        # Cancel only the raw transports, not their callers. Transport cleanup
+        # kills and reaps its own process group before a fresh instance exists.
+        tasks = tuple(generation.operations)
+        if generation.watcher is not None:
+            tasks += (generation.watcher,)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if not self._closing:
+            await self.backend._restart_after_interrupted_command()
+
+    async def _finish_recovery(self, generation):
+        try:
+            await finish_cleanup(generation.recovery)
+        except Exception as exc:
+            raise InfrastructureError("Sandbox could not recover after interrupted command") from exc
+        if self._generation is generation and not self._closing:
+            self._generation = _SandboxGeneration()
+            self._start_watcher(self._generation)
+
+    async def _report_failure(self, generation):
+        await self._finish_recovery(generation)
+        if isinstance(generation.failure, MemoryLimitExceeded):
+            return CommandResult(str(generation.failure), 137)
+        raise InfrastructureError("Sandbox command interrupted by instance recovery") from generation.failure
 
     async def start(self):
         try:
             await self.backend.start()
         except Exception as exc:
             raise InfrastructureError(f"Could not start Frontier-CS container: {exc}") from exc
+        self._start_watcher(self._generation)
 
     async def run(self, command, timeout=None, stdin_data=None) -> CommandResult:
-        sandbox = self.backend
+        sandbox, generation = self.backend, self._generation
+        if self._closing:
+            raise InfrastructureError("Frontier-CS sandbox is closed")
+        if generation.failure is not None:
+            return await self._report_failure(generation)
         if not sandbox.started or sandbox._stopping:
             raise InfrastructureError("Frontier-CS sandbox is unavailable")
-        # The pinned backend's run method reads a process-global RSS limit.
-        # Reuse its transport while applying this task's own PSS budget.
-        transport = _backend_module()._run_process(
-            sandbox._exec_args(command),
-            timeout=sandbox.default_timeout if timeout is None else timeout,
-            env=sandbox._instance_environment(), stdin_data=stdin_data,
-        )
-        try:
-            result = await _guard_memory(transport, sandbox.instance_pid, self.memory_limit_bytes)
-        except asyncio.CancelledError:
-            sandbox.started = False
-            await finish_cleanup(asyncio.create_task(sandbox._restart_after_interrupted_command()))
-            raise
-        except MemoryLimitExceeded as exc:
-            result = _backend_module().LocalRunResult(output=str(exc), return_code=137)
-        if result.return_code in (124, 137):
-            sandbox.started = False
+
+        async def transport():
+            process = None
+
+            def started(proc):
+                nonlocal process
+                process = proc
+                generation.exec_pids.add(proc.pid)
+
             try:
-                await finish_cleanup(asyncio.create_task(sandbox._restart_after_interrupted_command()))
-            except Exception as exc:
-                raise InfrastructureError("Sandbox could not recover after interrupted command") from exc
+                return await _backend_module()._run_process(
+                    sandbox._exec_args(command),
+                    timeout=sandbox.default_timeout if timeout is None else timeout,
+                    env=sandbox._instance_environment(), stdin_data=stdin_data,
+                    on_process_started=started,
+                )
+            finally:
+                if process is not None:
+                    generation.exec_pids.discard(process.pid)
+
+        operation = asyncio.create_task(transport())
+        generation.operations.add(operation)
+        try:
+            result = await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            if self._closing:
+                raise InfrastructureError("Frontier-CS sandbox was closed")
+            caller_cancelled = asyncio.current_task().cancelling() > 0
+            self._begin_recovery(generation, InfrastructureError("Command cancelled"))
+            if caller_cancelled:
+                await self._finish_recovery(generation)
+                raise
+            return await self._report_failure(generation)
+        finally:
+            generation.operations.discard(operation)
+        if self._closing:
+            raise InfrastructureError("Frontier-CS sandbox was closed")
+        if generation.failure is not None:
+            return await self._report_failure(generation)
+        if result.return_code in (124, 137):
+            self._begin_recovery(generation, InfrastructureError("Command interrupted"))
+            await self._finish_recovery(generation)
         return CommandResult(result.output, result.return_code)
 
-    async def close(self):
+    async def _close(self):
+        self._closing = True
+        generation = self._generation
+        if generation.watcher is not None:
+            generation.watcher.cancel()
+        tasks = tuple(generation.operations)
+        for task in tasks:
+            task.cancel()
+        if generation.watcher is not None:
+            tasks += (generation.watcher,)
+        if generation.recovery is not None:
+            tasks += (generation.recovery,)
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self.backend.stop()
+
+    async def close(self):
+        self._closing = True
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        await finish_cleanup(self._close_task)
 
 
 class Service:
@@ -420,7 +541,8 @@ async def _watch_memory(root_pid, limit):
     unreadable_since = None
     while True:
         try:
-            used = await asyncio.to_thread(process_tree_pss_bytes, root_pid)
+            roots = root_pid() if callable(root_pid) else root_pid
+            used = await asyncio.to_thread(process_tree_pss_bytes, roots)
             unreadable_since = None
         except PermissionError:
             # A setuid Singularity starter is temporarily non-dumpable before

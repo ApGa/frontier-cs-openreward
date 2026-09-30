@@ -317,6 +317,9 @@ class AlgorithmicSession:
                   ("AGENT.md", "submit.sh", "submit.py", "statement.txt", "config.yaml")]
         self.sandbox = Sandbox(
             self.pool.images["agent_image"], mounts=mounts,
+            # The official algorithmic agent contract is 4 GiB. Candidate
+            # judging retains its separate per-problem native limits.
+            memory_limit_bytes=4 * 1024**3,
             env={"PROBLEM_ID": self.task.problem_id,
                  "JUDGE_URL": self.pool.proxy_url + "/" + self.session_key,
                  "SUBMIT_MAX_POLL_TIME": "10800"},
