@@ -43,6 +43,7 @@ class HostInstance:
         self.instance_pid = None
         self.process = None
         self.restarts = 0
+        self.forced_stops = 0
         self.retired = []
 
     async def start(self):
@@ -73,7 +74,12 @@ class HostInstance:
         if self.process:
             self.retired.append(self.process)
 
-    async def _restart_after_interrupted_command(self):
+    async def _stop_instance(self, *, force=False):
+        self.forced_stops += int(force)
+        await self._kill()
+        self.started = False
+
+    async def _restart_after_interrupted_command(self, *, force=False):
         await self._kill()
         self.restarts += 1
         await self.start()
@@ -119,6 +125,7 @@ async def test_actual_exec_memory_breach_recovers_and_preserves_files(backend_mo
         assert result.exit_code == 137
         assert 'Task memory limit exceeded' in result.output
         assert sandbox.backend.restarts == 1
+        assert sandbox.backend.forced_stops == 1
         assert not sandbox._generation.exec_pids
         assert (await sandbox.run('cat retained')).output == 'still here'
     finally:
@@ -140,6 +147,7 @@ async def test_background_breach_is_reported_on_next_call(backend_module, tmp_pa
         assert (await sandbox.run('echo first')).exit_code == 137
         assert (await sandbox.run('test -f allocate && echo healthy')).output == 'healthy\n'
         assert sandbox.backend.restarts == 1
+        assert sandbox.backend.forced_stops == 1
     finally:
         await sandbox.close()
 
@@ -187,6 +195,7 @@ async def test_cancellation_and_close_reap_commands_and_watcher(backend_module, 
     assert isinstance(results[0], asyncio.CancelledError)
     assert isinstance(results[1], InfrastructureError)
     assert sandbox.backend.restarts == 1
+    assert sandbox.backend.forced_stops == 0
     assert not generation.exec_pids
     assert generation.watcher.done()
     current = sandbox._generation

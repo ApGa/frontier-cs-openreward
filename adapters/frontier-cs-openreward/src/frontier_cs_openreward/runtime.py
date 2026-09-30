@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from .contracts import CommandResult, InfrastructureError, TaskRecord
 
-_BACKEND_REVISION = "97bc90e619f61dd1d21e80be3627dddd42235d63"
+_BACKEND_REVISION = "ac655366358b891419ba7287f82e69efb21434e2"
 
 
 @lru_cache(maxsize=1)
@@ -196,9 +196,17 @@ class Sandbox:
         for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        force = isinstance(generation.failure, MemoryLimitExceeded)
+        try:
+            if force:
+                # Detached work is owned by namespace init, not an active exec.
+                # A graceful stop would let it allocate for another ten seconds.
+                # Stop it before waiting for pipes an escaped child may hold.
+                await self.backend._stop_instance(force=True)
+        finally:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if not self._closing:
-            await self.backend._restart_after_interrupted_command()
+            await self.backend._restart_after_interrupted_command(force=force)
 
     async def _finish_recovery(self, generation):
         try:
