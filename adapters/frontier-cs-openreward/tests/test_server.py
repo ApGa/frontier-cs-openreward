@@ -137,6 +137,24 @@ def test_openreward_tool_discovery_and_input_dispatch(task):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("description", [{}, {"description": ""}, {"description": None}])
+@pytest.mark.parametrize("tool_name", ["bash", "view"])
+def test_ignored_description_allows_omission_empty_or_mcp_null(task, tmp_path, description, tool_name):
+    """The MCP bridge fills omitted optional arguments with None."""
+    env, _ = make_env(task, FakeRuntime(local_commands=True))
+    path = tmp_path / "input.txt"
+    path.write_text("CONTENT_OK\n")
+    required = {"command": "printf CONTENT_OK"} if tool_name == "bash" else {"path": str(path)}
+
+    async def check():
+        result = await env._call_tool(tool_name, {**required, **description})
+        assert "CONTENT_OK" in content(result.root.output)
+        missing_required = await env._call_tool(tool_name, description)
+        assert "validation error" in missing_required.root.error
+
+    asyncio.run(check())
+
+
 def test_both_environment_names_work_through_openreward_http(task):
     second = replace(task, task_id="2.0/demo", suite="2.0")
     catalog = SimpleNamespace(tasks=(task, second))

@@ -33,13 +33,13 @@ class Catalog(Protocol):
 
 class BashInput(BaseModel):
     command: str = Field(min_length=1, description="Shell command in the task workspace")
-    description: str = ""
+    description: str | None = ""
     timeout: float | None = Field(default=None, gt=0, description="Optional timeout in seconds")
 
 
 class FileInput(BaseModel):
     path: str = Field(min_length=1, description="Path inside the task environment")
-    description: str = ""
+    description: str | None = ""
 
 
 class CreateFileInput(FileInput):
