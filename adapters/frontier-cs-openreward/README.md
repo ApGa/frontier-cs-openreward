@@ -13,8 +13,7 @@ builds each task sandbox on `SingularitySandbox` and the process transport in
 
 `sandbox_backends.py` and `session_cleanup.py` are vendored from the SWE-rebench V2 OpenReward
 environment (`ApGa/SWE-rebench-V2-OpenRewardEnv`) at commit
-`ac655366358b891419ba7287f82e69efb21434e2`. Both files are by this adapter's author and are
-MIT-licensed.
+`ac655366358b891419ba7287f82e69efb21434e2`, and are MIT-licensed.
 
 - `session_cleanup.py` is byte-identical to the source, sha256
   `a1e3ed3590dbd59f813b53d4275ceb5279b7ba174dbe59169bf30401f7f634e1`.
