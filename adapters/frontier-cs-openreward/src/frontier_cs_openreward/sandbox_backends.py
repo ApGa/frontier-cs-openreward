@@ -29,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Protocol, TextIO
 from uuid import uuid4
 
-from session_cleanup import remove_session_tree
+from .session_cleanup import remove_session_tree
 
 _PID_NAMESPACE_LAUNCHER = """\
 import ctypes

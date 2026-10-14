@@ -1,4 +1,4 @@
-"""Isolated HPC runtime built on the existing OpenReward Singularity backend."""
+"""Isolated HPC runtime built on the vendored OpenReward Singularity backend."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
-import importlib
 import json
 import logging
 import os
@@ -14,33 +13,17 @@ from pathlib import Path
 import re
 import signal
 import socket
-import subprocess
 import sys
 from typing import Any
 from uuid import uuid4
 
+from . import sandbox_backends
 from .contracts import CommandResult, InfrastructureError, TaskRecord
 
-_BACKEND_REVISION = "ac655366358b891419ba7287f82e69efb21434e2"
 
-
-@lru_cache(maxsize=1)
 def _backend_module():
-    path = Path(os.environ["FRONTIER_SANDBOX_BACKEND_ROOT"]).resolve()
-    revision = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
-    if revision != _BACKEND_REVISION:
-        raise InfrastructureError("Frontier-CS sandbox dependency revision mismatch")
-    changed = subprocess.check_output(
-        ["git", "-C", str(path), "diff", "HEAD", "--", "sandbox_backends.py", "session_cleanup.py"], text=True,
-    )
-    if changed:
-        raise InfrastructureError("Frontier-CS sandbox dependency has uncommitted changes")
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
-    module = importlib.import_module("sandbox_backends")
-    if Path(module.__file__).resolve() != path / "sandbox_backends.py":
-        raise InfrastructureError("Another sandbox backend shadows the pinned dependency")
-    return module
+    """Return the vendored sandbox backend; tests substitute this seam."""
+    return sandbox_backends
 
 
 @dataclass

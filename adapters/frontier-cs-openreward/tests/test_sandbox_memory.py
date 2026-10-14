@@ -1,36 +1,25 @@
-"""Exercise the PSS owner with real bounded processes and the pinned transport.
+"""Exercise the PSS owner with real bounded processes and the vendored transport.
 
 The host fixture substitutes only Singularity lifecycle operations; exec transport,
 process registration, accounting, recovery ordering, and command failures are real.
 Actual namespace orphan adoption is covered by the separate deployed SIF probe.
 """
 import asyncio
-import importlib.util
 import os
-from pathlib import Path
 import shlex
 import signal
 import sys
 
 import pytest
 
-from frontier_cs_openreward import runtime
+from frontier_cs_openreward import runtime, sandbox_backends
 from frontier_cs_openreward.contracts import InfrastructureError
 
 
 @pytest.fixture
-def backend_module(monkeypatch):
-    configured = os.environ.get('FRONTIER_SANDBOX_BACKEND_ROOT')
-    if not configured:
-        pytest.skip('Set FRONTIER_SANDBOX_BACKEND_ROOT for real transport integration tests')
-    path = Path(configured)
-    monkeypatch.syspath_prepend(str(path))
-    spec = importlib.util.spec_from_file_location('frontier_test_transport', path / 'sandbox_backends.py')
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, spec.name, module)
-    spec.loader.exec_module(module)
-    monkeypatch.setattr(runtime, '_backend_module', lambda: module)
-    return module
+def backend_module():
+    assert runtime._backend_module() is sandbox_backends
+    return sandbox_backends
 
 
 class HostInstance:
