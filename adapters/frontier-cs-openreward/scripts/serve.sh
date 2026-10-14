@@ -26,7 +26,7 @@
 #
 # NODE_LOCAL_DIR is a node-local directory outside the checkout. All of the server's state (sessions, images,
 # runtime scratch and the materialized catalog, which holds reference solutions and judge tokens) lives in
-# $NODE_LOCAL_DIR/frontier-cs-openreward. serve.sh locks that directory, sweeps it at start (stopping leftover
+# $NODE_LOCAL_DIR/frontier-cs-serve. serve.sh locks that directory, sweeps it at start (stopping leftover
 # instances and processes first), between restarts (sessions only) and at exit.
 #
 # Preflight, before the server answers /health: a clean checkout whose HEAD contains the pinned upstream
@@ -63,7 +63,7 @@ LOCK_SPEC=$ADAPTER_DIR/server.lock
 [[ -r ${FRONTIER_ENV:-} ]] || die "Set FRONTIER_ENV to a readable site env file"
 set -a
 # shellcheck source=/dev/null
-source "$FRONTIER_ENV"
+source "$FRONTIER_ENV" || die "Sourcing $FRONTIER_ENV failed"
 set +a
 for name in FRONTIER_MATERIALIZED_ROOT FRONTIER_SESSION_ROOT SWE_APPTAINER_SESSION_ROOT SWE_SINGULARITY_SESSION_ROOT \
     SWE_APPTAINER_IMAGE_CACHE SWE_SINGULARITY_IMAGE_CACHE SINGULARITY_CACHEDIR SINGULARITY_TMPDIR; do
@@ -136,12 +136,18 @@ NODE_LOCAL_DIR=$(cd -- "$NODE_LOCAL_DIR" && pwd -P)
 case $NODE_LOCAL_DIR/ in
   "$SOURCE_ROOT"/*) die "NODE_LOCAL_DIR must be outside the checkout: the server refuses a dirty tree" ;;
 esac
-STATE=$NODE_LOCAL_DIR/frontier-cs-openreward
+STATE=$NODE_LOCAL_DIR/frontier-cs-serve
+STATE_MARKER=$STATE/.created-by-frontier-cs-serve
+# The sweep deletes STATE: nothing serve.sh needs may live there.
+for path in "$SOURCE_ROOT" "$(dirname -- "$PYTHON")" "$(dirname -- "$MANIFEST")" "$(dirname -- "$FRONTIER_ENV")"; do
+  path=$(realpath -m -- "$path")
+  case $path/ in "$STATE"/*) die "$path is inside $STATE, which serve.sh deletes" ;; esac
+done
 RUNTIME=${SWE_CONTAINER_RUNTIME_BIN:-$(command -v singularity || command -v apptainer || true)}
 
 # One serve.sh per NODE_LOCAL_DIR: the sweep below would destroy a running server's state. Children never
 # inherit the lock (9>&-), so a crashed launcher's leftovers do not block the next sweep.
-exec 9>>"$NODE_LOCAL_DIR/.frontier-cs-openreward.lock"
+exec 9>>"$NODE_LOCAL_DIR/.frontier-cs-serve.lock"
 command -v flock >/dev/null 2>&1 || die "flock (util-linux) is required"
 flock -n 9 || die "Another serve.sh holds $NODE_LOCAL_DIR; stop it first"
 
@@ -149,6 +155,8 @@ flock -n 9 || die "Another serve.sh holds $NODE_LOCAL_DIR; stop it first"
 sweep() {
   local dir=$1 name
   [[ -e $dir ]] || return 0
+  # Delete only a state directory serve.sh created.
+  [[ $dir != "$STATE" || -f $STATE_MARKER ]] || die "Refusing to delete $STATE: serve.sh did not create it"
   if [[ -n $RUNTIME && -x $RUNTIME ]]; then
     while IFS= read -r name; do
       if [[ -n $name ]]; then "$RUNTIME" instance stop --force "$name" >/dev/null 2>&1 || true; fi
@@ -476,6 +484,7 @@ trap 'stop_requested=1; stop_server; exit 130' INT
 
 log "sweeping $STATE"
 sweep "$STATE"
+mkdir -p "$STATE" && : > "$STATE_MARKER"
 mkdir -p "$STATE/run" "$FRONTIER_SESSION_ROOT" "$SWE_APPTAINER_IMAGE_CACHE" "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"
 chmod 0700 "$STATE" "$STATE/run" "$FRONTIER_SESSION_ROOT" "$SINGULARITY_CACHEDIR" "$SINGULARITY_TMPDIR"
 

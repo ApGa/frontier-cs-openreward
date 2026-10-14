@@ -71,7 +71,7 @@ sandboxes with SingularityCE as your own user. `scripts/` holds two scheduler-ne
 - **Port 8085 is an unauthenticated shell** that runs as you. `serve.sh` binds `OPENREWARD_HOST`
   and refuses `0.0.0.0` unless `ALLOW_ALL_INTERFACES=1`. Firewall the port to the job's nodes.
 - **Node-local state.** Sessions, images, runtime scratch and the catalog live in
-  `$NODE_LOCAL_DIR/frontier-cs-openreward`. `serve.sh` locks it, and sweeps it at start, between
+  `$NODE_LOCAL_DIR/frontier-cs-serve`. `serve.sh` locks it, and sweeps it at start, between
   restarts and at exit. The catalog holds reference solutions and judge tokens: never share it.
 - **`/health` is static.** Clients should also check `/list_environments` and each environment's
   `num_tasks`.

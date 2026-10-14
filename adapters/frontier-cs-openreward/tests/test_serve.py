@@ -166,13 +166,32 @@ def test_state_always_lives_under_node_local_dir(site, tmp_path):
     assert not (tmp_path / "shared-catalog").exists()
 
 
+def test_refuses_to_delete_a_state_directory_it_did_not_create(site):
+    (site.node_local / "frontier-cs-serve").mkdir()
+    (site.node_local / "frontier-cs-serve/data.txt").write_text("keep me\n")
+    result = site()
+    assert result.returncode == 2
+    assert "did not create it" in result.stderr
+    assert (site.node_local / "frontier-cs-serve/data.txt").exists()
+
+
+def test_refuses_a_checkout_inside_its_state_directory(site, tmp_path):
+    inside = site.node_local / "frontier-cs-serve"
+    inside.mkdir()
+    site.checkout.rename(inside / "checkout")
+    result = site(FRONTIER_SOURCE_ROOT=str(inside / "checkout"))
+    assert result.returncode == 2
+    assert "which serve.sh deletes" in result.stderr
+    assert (inside / "checkout/adapters").is_dir()
+
+
 def test_check_leaves_only_the_lock_file(site):
     site()
-    assert [path.name for path in site.node_local.iterdir()] == [".frontier-cs-openreward.lock"]
+    assert [path.name for path in site.node_local.iterdir()] == [".frontier-cs-serve.lock"]
 
 
 def test_refuses_a_node_local_directory_another_serve_holds(site):
-    with open(site.node_local / ".frontier-cs-openreward.lock", "a") as lock:
+    with open(site.node_local / ".frontier-cs-serve.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = site()
     assert result.returncode == 2
