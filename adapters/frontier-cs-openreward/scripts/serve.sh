@@ -301,7 +301,8 @@ extra = sorted(set(installed) - set(pinned))
 if extra:
     problems.append("not in the lock: " + " ".join(extra))
 if problems:
-    sys.exit(f"{sys.prefix}: " + "; ".join(problems[:12]))
+    more = f"; and {len(problems) - 12} more" if len(problems) > 12 else ""
+    sys.exit(f"{sys.prefix}: " + "; ".join(problems[:12]) + more)
 print(f"{sys.prefix}: {len(pinned)} packages, exactly server.lock (Python {sys.version.split()[0]})")
 PY
 }
