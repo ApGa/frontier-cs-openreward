@@ -29,8 +29,11 @@ case $1 in
         name=${!#} pidfile=
         while (($#)); do [[ $1 == --pid-file ]] && pidfile=$2; shift; done
         title="Singularity"; [[ ${FAKE_FLAVOR:-singularity} == apptainer ]] && title="Apptainer"
-        (exec -a "$title instance: $(id -un) [$name]" sleep 300) </dev/null >/dev/null 2>&1 &
-        echo $! > "$pidfile"; echo $! > "$state/$name"; exit 0 ;;
+        # As SingularityCE 4.4 does with --containall, the PID file names a child of the titled process.
+        (exec -a "$title instance: $(id -un) [$name]" /bin/bash -c 'sleep 300 & echo $! > "$1"; wait' _ "$pidfile") \
+          </dev/null >/dev/null 2>&1 &
+        for _ in $(seq 50); do [[ -s $pidfile ]] && break; sleep 0.1; done
+        cp "$pidfile" "$state/$name"; exit 0 ;;
       list) printf '{"instances": [{"instance": "%s", "pid": 1, "img": "/x"}]}\n' "${!#}"; exit 0 ;;
       stop) kill "$(cat "$state/${!#}")" 2>/dev/null; rm -f "$state/${!#}"; exit 0 ;;
     esac ;;
@@ -96,6 +99,8 @@ def test_a_working_singularity_is_path_a_and_failures_do_not_stop_the_probe(prob
                   "a_exec", "a_instance_list", "a_instance_stop"):
         assert verdict[f"CHECK_{check}"] == "pass", (check, result.stdout)
     assert verdict["PATH_B_READY"] == "no" and verdict["CHECK_b_create"] == "skip"
+    assert verdict["A_PIDFILE_PROCESS"] == "sleep 300"
+    assert verdict["A_INSTANCE_TITLE"].startswith("Singularity instance: ")
 
 
 def test_the_probe_removes_what_it_creates(probe):

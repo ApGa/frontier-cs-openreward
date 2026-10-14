@@ -150,10 +150,11 @@ value CGROUP_VERSION "$CGROUP_VERSION"
 cat /proc/self/cgroup
 if [[ $CGROUP_VERSION != unknown ]]; then record cgroup pass "$CGROUP_VERSION ($CGROUP_FS)"
 else record cgroup fail "/sys/fs/cgroup is ${CGROUP_FS:-missing}"; fi
+# Informational (USER_DBUS): the go-judge check below shows whether it changes go-judge's mode.
 if [[ -S /run/user/$UID_NOW/bus ]]; then
-  ls -l "/run/user/$UID_NOW/bus"; value USER_DBUS yes; record user_dbus pass "/run/user/$UID_NOW/bus"
+  ls -l "/run/user/$UID_NOW/bus"; value USER_DBUS yes; record user_dbus pass "yes: /run/user/$UID_NOW/bus"
 else
-  value USER_DBUS no; record user_dbus fail "no /run/user/$UID_NOW/bus (no systemd user manager in this step)"
+  value USER_DBUS no; record user_dbus pass "no /run/user/$UID_NOW/bus (no systemd user manager in this step)"
 fi
 
 section "host tools"
@@ -170,8 +171,9 @@ section "internet"
 for site in pypi=https://pypi.org/simple/ github=https://github.com codeforces=https://codeforces.com; do
   name=${site%%=*} url=${site#*=}
   code=$(curl -s -o /dev/null -I --max-time "$NET_TIMEOUT" -w '%{http_code}' "$url" 2>/dev/null)
-  if [[ $code =~ ^[23] ]]; then record "net_$name" pass "$url HTTP $code"
-  else record "net_$name" fail "$url HTTP ${code:-none}"; fi
+  # Any HTTP answer proves reachability: codeforces answers curl's HEAD with 403.
+  if [[ $code =~ ^[1-5][0-9][0-9]$ ]]; then record "net_$name" pass "$url HTTP $code"
+  else record "net_$name" fail "$url: no HTTP answer"; fi
 done
 
 section "go-judge (rlimit mode)"
@@ -267,12 +269,22 @@ else
     INSTANCE_STARTED=1
   fi
   if ((INSTANCE_STARTED)); then
-    title=$(ps -o args= -p "$(cat "$A_DIR/pid" 2>/dev/null)" 2>/dev/null)
+    # The PID file can name the container's init (SingularityCE 4.4 with --containall names sinit); the
+    # instance's title is on it or on an ancestor.
+    pid=$(cat "$A_DIR/pid" 2>/dev/null)
+    value A_PIDFILE_PROCESS "$(ps -o args= -p "${pid:-0}" 2>/dev/null)"
+    title=
+    for _ in 1 2 3 4; do
+      if ! [[ $pid =~ ^[0-9]+$ ]] || ((pid <= 1)); then break; fi
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      case $args in "Singularity instance:"*|"Apptainer instance:"*) title=$args; break ;; esac
+      pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    done
     value A_INSTANCE_TITLE "$title"
     case $title in
       "Singularity instance:"*) A_FLAVOR=singularity; record a_instance_title pass "$title" ;;
       "Apptainer instance:"*) A_FLAVOR=apptainer; record a_instance_title pass "$title" ;;
-      *) record a_instance_title fail "unexpected process title: ${title:-none}"; A_OK=0 ;;
+      *) record a_instance_title fail "no instance title on the PID file's process or its parents"; A_OK=0 ;;
     esac
     exec_out=$(limit 120 "$RUNTIME" exec --cleanenv --env GIT_CONFIG_GLOBAL=/tmp/.gitconfig-openreward --cwd / \
       "instance://$INSTANCE_NAME" /bin/sh -c 'id -u; echo DEV; ls /dev; echo SHM; df -h /dev/shm | tail -1' 2>&1)
@@ -348,7 +360,7 @@ echo "CGROUP_TYPE=$CGROUP_TYPE"
 echo "CPUS=${VALUE[CPUS]}"
 echo "STOP=$STOP"
 for key in CGROUP_VERSION USER_DBUS CPU_MODEL MEM_TOTAL_GIB NODE_LOCAL_FREE_GIB NODE_LOCAL_FSTYPE ULIMIT_NOFILE \
-    ULIMIT_NPROC ULIMIT_VMEM A_RUNTIME A_VERSION A_FLAVOR A_INSTANCE_TITLE; do
+    ULIMIT_NPROC ULIMIT_VMEM A_RUNTIME A_VERSION A_FLAVOR A_PIDFILE_PROCESS A_INSTANCE_TITLE; do
   [[ -n ${VALUE[$key]+x} ]] && printf '%s=%s\n' "$key" "${VALUE[$key]}"
 done
 echo "HOST=$(hostname)"
