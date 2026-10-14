@@ -160,6 +160,12 @@ def test_refuses_a_go_judge_with_the_wrong_digest(site):
     assert "the manifest pins go-judge" in lines(result, "FAIL")["go_judge"]
 
 
+def test_state_always_lives_under_node_local_dir(site, tmp_path):
+    result = site(FRONTIER_MATERIALIZED_ROOT=str(tmp_path / "shared-catalog"))
+    assert "WARNING: ignoring FRONTIER_MATERIALIZED_ROOT" in result.stdout
+    assert not (tmp_path / "shared-catalog").exists()
+
+
 def test_check_leaves_only_the_lock_file(site):
     site()
     assert [path.name for path in site.node_local.iterdir()] == [".frontier-cs-openreward.lock"]

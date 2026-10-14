@@ -33,7 +33,7 @@ NET_TIMEOUT=${PROBE_NET_TIMEOUT:-15}
 while (($#)); do
   case $1 in
     --node-local) NODE_LOCAL_DIR=${2:?--node-local needs a directory}; shift 2 ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && !/^#/ {exit} NR > 1' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

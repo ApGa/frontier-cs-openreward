@@ -51,7 +51,7 @@ CHECK_ONLY=0
 while (($#)); do
   case $1 in
     --check) CHECK_ONLY=1; shift ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && !/^#/ {exit} NR > 1' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -65,6 +65,10 @@ set -a
 # shellcheck source=/dev/null
 source "$FRONTIER_ENV"
 set +a
+for name in FRONTIER_MATERIALIZED_ROOT FRONTIER_SESSION_ROOT SWE_APPTAINER_SESSION_ROOT SWE_SINGULARITY_SESSION_ROOT \
+    SWE_APPTAINER_IMAGE_CACHE SWE_SINGULARITY_IMAGE_CACHE SINGULARITY_CACHEDIR SINGULARITY_TMPDIR; do
+  [[ -z ${!name:-} ]] || log "WARNING: ignoring $name from $FRONTIER_ENV: serve.sh keeps all state under NODE_LOCAL_DIR"
+done
 # Credentials never reach the server or its sandboxes.
 for secret_name in WANDB_API_KEY OPENAI_API_KEY OPENAI_BASE_URL LITELLM_API_KEY LITELLM_BASE_URL \
     RUBRIC_DEFAULT_LLM HF_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN TINKER_API_KEY; do
